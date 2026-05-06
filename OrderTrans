@@ -1,0 +1,153 @@
+
+from google.colab import output
+output.enable_custom_widget_manager()
+
+from ipyleaflet import Map, Marker, Polyline, WidgetControl, DivIcon
+from IPython.display import display
+import ipywidgets as widgets
+import requests
+import datetime
+import threading
+import time
+import math
+import random
+import numpy as np
+import skfuzzy as fuzzy
+from skfuzzy import control as ctrl
+
+def calculate_fuzzy_surge(has_rain, has_jam):
+    rain = ctrl.Antecedent(np.arange(0, 1.1, 0.1), 'rain')
+    jam = ctrl.Antecedent(np.arange(0, 1.1, 0.1), 'jam')
+    surge = ctrl.Consequent(np.arange(0, 21, 1), 'surge')
+    rain['no'] = fuzzy.trimf(rain.universe, [0, 0, 0.5])
+    rain['yes'] = fuzzy.trimf(rain.universe, [0.5, 1, 1])
+    jam['no'] = fuzzy.trimf(jam.universe, [0, 0, 0.5])
+    jam['yes'] = fuzzy.trimf(jam.universe, [0.5, 1, 1])
+    surge['low'] = fuzzy.trimf(surge.universe, [0, 0, 5])
+    surge['medium'] = fuzzy.trimf(surge.universe, [5, 10, 15])
+    surge['high'] = fuzzy.trimf(surge.universe, [15, 20, 20])
+    rule1 = ctrl.Rule(rain['no'] & jam['no'], surge['low'])
+    rule2 = ctrl.Rule(rain['yes'] & jam['no'], surge['medium'])
+    rule3 = ctrl.Rule(rain['no'] & jam['yes'], surge['medium'])
+    rule4 = ctrl.Rule(rain['yes'] & jam['yes'], surge['high'])
+    surge_ctrl = ctrl.ControlSystem([rule1, rule2, rule3, rule4])
+    sim = ctrl.ControlSystemSimulation(surge_ctrl)
+    sim.input['rain'] = 1.0 if has_rain else 0.0
+    sim.input['jam'] = 1.0 if has_jam else 0.0
+    sim.compute()
+    return sim.output['surge']
+
+GIÁ_MỖI_KM = 12500
+app_state = {'points': [], 'markers': [], 'route_line': None, 'incidents': [], 'drivers': [], 'is_locked': False}
+
+info_widget = widgets.HTML(value="<i>👉 Click bản đồ để chọn Điểm Đón.</i>")
+m = Map(center=(10.7626, 106.6601), zoom=14)
+
+chat_display = widgets.HTML(
+    value='<div id="chat_content" style="height: 150px; overflow-y: auto; border: 1px solid #ccc; padding: 5px; background: #f9f9f9; font-family: sans-serif;"><b>Hệ thống:</b> Chào mừng bạn! Vui lòng đặt xe để chat với tài xế.</div>'
+)
+chat_input = widgets.Text(placeholder='Nhập tin nhắn cho tài xế...', layout=widgets.Layout(width='80%'))
+chat_send_btn = widgets.Button(description="Gửi", button_style='primary', layout=widgets.Layout(width='18%'))
+
+chat_box = widgets.VBox([
+    widgets.HTML("<b>💬 Chat với tài xế</b>"),
+    chat_display,
+    widgets.HBox([chat_input, chat_send_btn])
+], layout=widgets.Layout(border='1px solid black', padding='10px', margin='10px 0', width='100%'))
+
+def add_message(sender, message, color="black"):
+    # Cập nhật nội dung chat và tự động cuộn xuống
+    old_val = chat_display.value.replace('</div>', '')
+    new_msg = f'<br><b style="color:{color}">{sender}:</b> {message}'
+    chat_display.value = old_val + new_msg + '</div>'
+
+def on_send_click(b):
+    msg = chat_input.value.strip()
+    if msg:
+        if not app_state['is_locked']:
+            add_message("Hệ thống", "Vui lòng Xác nhận chuyến đi trước khi chat.", "red")
+        else:
+            add_message("Bạn", msg, "blue")
+            chat_input.value = ""
+            # Logic phản hồi theo yêu cầu của bạn
+            def reply():
+                time.sleep(1) # Chờ 1 giây để tạo cảm giác thực tế
+                add_message("Tài xế", "vâng, tôi đã hiểu yêu cầu của quý khách ạ.", "green")
+            threading.Thread(target=reply).start()
+
+chat_send_btn.on_click(on_send_click)
+chat_input.on_submit(on_send_click) # Gửi khi nhấn Enter
+
+btn_confirm = widgets.Button(description="Xác nhận", button_style='success')
+btn_reset = widgets.Button(description="🔄 Reset", button_style='info')
+control_panel = widgets.HBox([btn_confirm])
+control_panel.layout.display = 'none'
+
+m.add_control(WidgetControl(widget=btn_reset, position='topright'))
+m.add_control(WidgetControl(widget=control_panel, position='bottomleft'))
+
+def get_dist(p1, p2):
+    # Công thức xấp xỉ đơn giản cho km
+    return math.sqrt((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2) * 111 
+
+def reset_all(b=None):
+    app_state['is_locked'] = False
+    app_state['points'].clear()
+    for item in app_state['markers'] + app_state['incidents'] + app_state['drivers']:
+        if item in m.layers: m.remove_layer(item)
+    if app_state['route_line'] and app_state['route_line'] in m.layers:
+        m.remove_layer(app_state['route_line'])
+    app_state['markers'] = []; app_state['incidents'] = []; app_state['drivers'] = []
+    control_panel.layout.display = 'none'
+    info_widget.value = "<i>🔄 Đã reset. Chọn lại điểm đi.</i>"
+    chat_display.value = '<div style="height: 150px; overflow-y: auto; border: 1px solid #ccc; padding: 5px; background: #f9f9f9;"><b>Hệ thống:</b> Đã làm mới phiên chat.</div>'
+
+def confirm_trip(b=None):
+    if len(app_state['points']) < 2: return
+    app_state['is_locked'] = True
+    control_panel.layout.display = 'none'
+    p1, p2 = app_state['points'][0], app_state['points'][1]
+    
+    try:
+        res = requests.get(f"http://router.project-osrm.org/route/v1/driving/{p1[1]},{p1[0]};{p2[1]},{p2[0]}?overview=full&geometries=geojson").json()
+        coords = [(c[1], c[0]) for c in res['routes'][0]['geometry']['coordinates']]
+        app_state['route_line'] = Polyline(locations=coords, color="blue", weight=5); m.add_layer(app_state['route_line'])
+        
+        # Xác định ngẫu nhiên tình trạng mưa/kẹt xe để dùng skfuzzy
+        has_rain = random.random() > 0.5
+        has_jam = random.random() > 0.5
+        
+        if has_rain: m.add_layer(Marker(location=coords[len(coords)//3], icon=DivIcon(html='🌧️')))
+        if has_jam: m.add_layer(Marker(location=coords[2*len(coords)//3], icon=DivIcon(html='⚠️')))
+        
+        surge = calculate_fuzzy_surge(has_rain, has_jam)
+        dist = res['routes'][0]['distance']/1000
+        info_widget.value = f"<b>{dist:.2f}km</b> - Tăng: {surge:.1f}% - <b>💰 Tổng: {(dist*GIÁ_MỖI_KM*(1+surge/100)):,.0f}đ</b>"
+        
+        # Hiện tài xế
+        for n in ['A', 'B', 'C']:
+            d_loc = (p1[0]+random.uniform(-0.005,0.005), p1[1]+random.uniform(-0.005,0.005))
+            d = Marker(location=d_loc, icon=DivIcon(html=f'<div style="font-size:20px;">🚗<b style="font-size:10px;background:white;">{n}</b></div>'))
+            m.add_layer(d); app_state['drivers'].append(d)
+        
+        add_message("Hệ thống", "Đã kết nối với tài xế. Bạn có thể gửi tin nhắn ngay.", "orange")
+    except:
+        info_widget.value = "❌ Lỗi kết nối dữ liệu bản đồ."
+
+def handle_click(**kwargs):
+    if not app_state['is_locked'] and kwargs.get('type') == 'click':
+        loc = kwargs.get('coordinates')
+        if len(app_state['points']) < 2:
+            app_state['points'].append(loc)
+            mk = Marker(location=loc); m.add_layer(mk); app_state['markers'].append(mk)
+            if len(app_state['points']) == 2: control_panel.layout.display = 'flex'
+
+m.on_interaction(handle_click)
+btn_confirm.on_click(confirm_trip); btn_reset.on_click(reset_all)
+
+display(widgets.VBox([
+    widgets.HTML("<h2>🚖 Grab Simulation (Auto-Reply Mode)</h2>"),
+    info_widget,
+    m,
+    chat_box
+]))
