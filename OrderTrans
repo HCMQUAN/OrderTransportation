@@ -56,7 +56,6 @@ chat_box = widgets.VBox([
 ], layout=widgets.Layout(border='1px solid black', padding='10px', margin='10px 0', width='100%'))
 
 def add_message(sender, message, color="black"):
-    # Cập nhật nội dung chat và tự động cuộn xuống
     old_val = chat_display.value.replace('</div>', '')
     new_msg = f'<br><b style="color:{color}">{sender}:</b> {message}'
     chat_display.value = old_val + new_msg + '</div>'
@@ -69,14 +68,13 @@ def on_send_click(b):
         else:
             add_message("Bạn", msg, "blue")
             chat_input.value = ""
-            # Logic phản hồi theo yêu cầu của bạn
             def reply():
-                time.sleep(1) # Chờ 1 giây để tạo cảm giác thực tế
+                time.sleep(1)
                 add_message("Tài xế", "vâng, tôi đã hiểu yêu cầu của quý khách ạ.", "green")
             threading.Thread(target=reply).start()
 
 chat_send_btn.on_click(on_send_click)
-chat_input.on_submit(on_send_click) # Gửi khi nhấn Enter
+chat_input.on_submit(on_send_click) 
 
 btn_confirm = widgets.Button(description="Xác nhận", button_style='success')
 btn_reset = widgets.Button(description="🔄 Reset", button_style='info')
@@ -87,7 +85,6 @@ m.add_control(WidgetControl(widget=btn_reset, position='topright'))
 m.add_control(WidgetControl(widget=control_panel, position='bottomleft'))
 
 def get_dist(p1, p2):
-    # Công thức xấp xỉ đơn giản cho km
     return math.sqrt((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2) * 111 
 
 def reset_all(b=None):
@@ -112,8 +109,7 @@ def confirm_trip(b=None):
         res = requests.get(f"http://router.project-osrm.org/route/v1/driving/{p1[1]},{p1[0]};{p2[1]},{p2[0]}?overview=full&geometries=geojson").json()
         coords = [(c[1], c[0]) for c in res['routes'][0]['geometry']['coordinates']]
         app_state['route_line'] = Polyline(locations=coords, color="blue", weight=5); m.add_layer(app_state['route_line'])
-        
-        # Xác định ngẫu nhiên tình trạng mưa/kẹt xe để dùng skfuzzy
+
         has_rain = random.random() > 0.5
         has_jam = random.random() > 0.5
         
@@ -124,7 +120,6 @@ def confirm_trip(b=None):
         dist = res['routes'][0]['distance']/1000
         info_widget.value = f"<b>{dist:.2f}km</b> - Tăng: {surge:.1f}% - <b>💰 Tổng: {(dist*GIÁ_MỖI_KM*(1+surge/100)):,.0f}đ</b>"
         
-        # Hiện tài xế
         for n in ['A', 'B', 'C']:
             d_loc = (p1[0]+random.uniform(-0.005,0.005), p1[1]+random.uniform(-0.005,0.005))
             d = Marker(location=d_loc, icon=DivIcon(html=f'<div style="font-size:20px;">🚗<b style="font-size:10px;background:white;">{n}</b></div>'))
